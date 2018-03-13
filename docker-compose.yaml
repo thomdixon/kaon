@@ -1,0 +1,13 @@
+version: '2.1'
+
+services:
+  kaon:
+    build: .
+    ports:
+      - "9111:8080"
+    depends_on:
+      - redis
+    environment:
+      - KAON_REDIS_HOST=redis
+  redis:
+    image: redis

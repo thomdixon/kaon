@@ -67,6 +67,4 @@ $ curl http://localhost:9111/1_
 
 # Development
 
-A `Vagrantfile` has been provided for convenience. Running `vagrant up` should
-result in a working environment with the host machine's `9111` port being
-forwarded to `8080` on the guest machine.
+Just use `docker-compose up` and you'll find kaon running on `localhost:9111`.
