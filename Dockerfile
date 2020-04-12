@@ -2,7 +2,8 @@ FROM golang
 
 ADD . /go/src/github.com/thomdixon/kaon
 
-RUN go get -u github.com/go-redis/redis
+WORKDIR /go/src/github.com/thomdixon/kaon
+RUN go mod download
 RUN go install github.com/thomdixon/kaon
 
 ENTRYPOINT /go/bin/kaon

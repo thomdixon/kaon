@@ -1,145 +1,196 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-redis/redis"
+	"github.com/spf13/viper"
 )
 
-const (
-	COUNTER     = "__kaon_counter__"
-	INFO_SUFFIX = "_"
-)
-
-var (
-	client *redis.Client
-)
-
-type Kaon struct {
-	Key          string
-	Original     string
-	Clicks       int64
-	CreationTime int64
+type ShortLink struct {
+	Key          string `json:"key"`
+	Original     string `json:"original"`
+	Clicks       int64  `json:"clicks"`
+	CreationTime int64  `json:"creationTime"`
 }
 
-func (k Kaon) Json() []byte {
-	m, _ := json.Marshal(k)
-	return m
-}
-
-func NewKaon(key string, original string) *Kaon {
-	kaon := new(Kaon)
-	kaon.CreationTime = time.Now().UnixNano()
-	kaon.Key = key
-	kaon.Original = original
-	kaon.Clicks = 0
-	return kaon
-}
-
-func FindKaon(key string) (*Kaon, error) {
-	k, _ := client.HExists(key, "Original").Result()
-	if !k {
-		return nil, errors.New("key does not exist: " + key)
-	} else {
-		kaon := new(Kaon)
-		kaon.Key = key
-		r, _ := client.HGetAll(key).Result()
-		kaon.Original = r["Original"]
-		kaon.Clicks, _ = strconv.ParseInt(r["Clicks"], 10, 64)
-		kaon.CreationTime, _ = strconv.ParseInt(r["CreationTime"], 10, 64)
-		return kaon, nil
+func (link *ShortLink) Fields() map[string]interface{} {
+	// mapstructure is overkill
+	return map[string]interface{}{
+		"key":          link.Key,
+		"original":     link.Original,
+		"creationTime": link.CreationTime,
+		"clicks":       link.Clicks,
 	}
 }
 
-func SaveKaon(key string, original string) *Kaon {
-	kaon := NewKaon(key, original)
-	go client.HMSet(kaon.Key,
-		map[string]interface{}{
-			"Original":     kaon.Original,
-			"CreationTime": kaon.CreationTime,
-			"Clicks":       kaon.Clicks,
-		})
-	return kaon
+func NewShortLinkFromStringMap(r map[string]string) *ShortLink {
+	link := NewShortLink(r["key"], r["original"])
+	link.Clicks, _ = strconv.ParseInt(r["clicks"], 10, 64)
+	link.CreationTime, _ = strconv.ParseInt(r["creationTime"], 10, 64)
+	return link
 }
 
-func HandleRequest(w http.ResponseWriter, r *http.Request) {
+func NewShortLink(key string, original string) *ShortLink {
+	link := &ShortLink{
+		CreationTime: time.Now().Unix(),
+		Key:          key,
+		Original:     original,
+	}
+	return link
+}
+
+type Server struct {
+	redisClient *redis.Client
+}
+
+func NewServer() *Server {
+	redisDest := fmt.Sprintf("%s:%d", viper.GetString("redis.host"), viper.GetInt("redis.port"))
+	if viper.GetBool("debug") {
+		log.Println("creating redis client for:", redisDest)
+	}
+	client := redis.NewClient(&redis.Options{
+		Addr: redisDest,
+		DB:   viper.GetInt("redis.db"),
+	})
+
+	return &Server{redisClient: client}
+}
+
+func (s *Server) ListenAndServe() error {
+	http.HandleFunc("/", s.handleRequest)
+
+	serverDest := fmt.Sprintf(":%d", viper.GetInt("port"))
+	if viper.GetBool("debug") {
+		log.Println("server starting on: ", serverDest)
+	}
+	return http.ListenAndServe(serverDest, nil)
+}
+
+func (s *Server) saveShortLink(link *ShortLink) error {
+	return s.redisClient.HMSet(link.Key, link.Fields()).Err()
+}
+
+func (s *Server) findShortLink(key string) (*ShortLink, error) {
+	k, err := s.redisClient.HExists(key, "original").Result()
+	if err != nil {
+		return nil, err
+	}
+	if !k {
+		return nil, errors.New("key does not exist: " + key)
+	}
+
+	r, err := s.redisClient.HGetAll(key).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	link := NewShortLinkFromStringMap(r)
+	return link, nil
+}
+
+func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		key := r.URL.Path[1:]
-		info := strings.HasSuffix(key, INFO_SUFFIX)
-		key = strings.Replace(key, INFO_SUFFIX, "", 1)
-		if key == "" {
-			w.WriteHeader(200)
-		} else {
-			kaon, err := FindKaon(key)
-			if err == nil {
-				if info {
-					w.Header().Set("Content-Type", "application/json")
-					r := kaon.Json()
-					w.Write(r)
-				} else {
-					client.HIncrBy(kaon.Key, "Clicks", 1)
-					http.Redirect(w, r, kaon.Original, http.StatusMovedPermanently)
-				}
-			} else {
-				http.NotFound(w, r)
+		link, err := s.findShortLink(key)
+		if err != nil {
+			if viper.GetBool("debug") {
+				log.Println("error getting key:", key, err)
 			}
+			http.NotFound(w, r)
+			return
 		}
+
+		s.redisClient.HIncrBy(link.Key, "clicks", 1)
+		http.Redirect(w, r, link.Original, http.StatusMovedPermanently)
+	case "TRACE":
+		if !viper.GetBool("show_info") {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		key := r.URL.Path[1:]
+		link, err := s.findShortLink(key)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+
+		w.WriteHeader(200)
+		w.Header().Set("Content-Type", "application/json")
+		data, _ := json.Marshal(link)
+		w.Write(data)
+
 	case "POST":
 		theURL := r.FormValue("url")
 		valid, err := url.Parse(theURL)
 		if err != nil || theURL == "" {
 			http.Error(w, "Invalid URL", http.StatusBadRequest)
-		} else {
-			counter, _ := client.Incr(COUNTER).Result()
-			key := strconv.FormatInt(counter, 36)
-			kaon := SaveKaon(key, valid.String())
-
-			w.Header().Set("Content-Type", "application/json")
-			r := kaon.Json()
-			w.Write(r)
+			return
 		}
+
+		b := make([]byte, viper.GetInt("entropy_bytes"))
+		_, err = rand.Read(b)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		key := base64.URLEncoding.EncodeToString(b)
+		link := NewShortLink(key, valid.String())
+		if s.saveShortLink(link) != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		data, _ := json.Marshal(link)
+		w.Write(data)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func main() {
-	redisHost := os.Getenv("KAON_REDIS_HOST")
-	if redisHost == "" {
-		redisHost = "localhost"
+	viper.SetEnvPrefix("kaon")
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	viper.AutomaticEnv()
+
+	// server
+	viper.SetDefault("debug", false)
+	viper.SetDefault("port", 8080)
+	viper.SetDefault("entropy_bytes", 10)
+	viper.SetDefault("show_info", true)
+
+	// redis
+	viper.SetDefault("redis.host", "localhost")
+	viper.SetDefault("redis.port", 6379)
+	viper.SetDefault("redis.db", 0)
+
+	// config file
+	viper.SetConfigName("config")
+	viper.AddConfigPath(".")
+
+	if err := viper.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			if viper.GetBool("debug") {
+				log.Println("no config file provided; using environment or defaults")
+			}
+		} else {
+			log.Fatalf("could not parse provided config file: %v", err)
+		}
 	}
 
-	redisPort := os.Getenv("KAON_REDIS_PORT")
-	if redisPort == "" {
-		redisPort = "6379"
-	}
-
-	redisDb, err := strconv.Atoi(os.Getenv("KAON_REDIS_DB"))
-	if err != nil {
-		redisDb = 0
-	}
-
-	redisDest := fmt.Sprintf("%s:%s", redisHost, redisPort)
-
-	listenPort := os.Getenv("KAON_PORT")
-	if listenPort == "" {
-		listenPort = "8080"
-	}
-
-	client = redis.NewClient(&redis.Options{
-		Addr: redisDest,
-		DB:   redisDb,
-	})
-
-	http.HandleFunc("/", HandleRequest)
-	http.ListenAndServe(":"+listenPort, nil)
+	server := NewServer()
+	server.ListenAndServe()
 }

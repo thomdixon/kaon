@@ -5,13 +5,15 @@ backend storage.
 
 ## Configuration
 
-You may set the following environment variables (default values in comments):
+An example configuration file (with explanations of config values)is provided in 
+`config.yaml`. You may also instead set any config value via environment variables.
+e.g.,
 
 ```bash
-KAON_REDIS_HOST  # localhost
-KAON_REDIS_PORT  # 6379
-KAON_REDIS_DB    # 0
-KAON_PORT        # 8080
+KAON_DEBUG=1
+KAON_REDIS_HOST=localhost
+KAON_REDIS_PORT=6379
+KAON_SHOW_INFO=0
 ```
 
 ## Usage
@@ -23,10 +25,10 @@ $ curl -XPOST -d 'url=http://example.com' http://localhost:9111/
 ```
 
 ```
-{"Key":"1","Original":"http://example.com","Clicks":0,"CreationTime":1425315326750138320}
+{"key":"1","original":"http://example.com","clicks":0,"creationTime":1586654007}
 ```
 
-The `Key` property on the returned object defines the new short URL. You may
+The `key` property on the returned object defines the new short URL. You may
 then nagivate to `http://localhost:9111/1` and be redirected to
 [http://example.com](http://example.com).
 
@@ -55,14 +57,15 @@ $ curl -v http://localhost:9111/1
 ```
 
 To view information about the stored object (such as the click count or original
-URL), simply append an underscore to the `Key` value:
+URL), ensure the `show_info` config value is enabled and then simply send a `TRACE`
+request, instead of a `GET`.
 
 ```
-$ curl http://localhost:9111/1_
+$ curl -XTRACE http://localhost:9111/1_
 ```
 
 ```
-{"Key":"1","Original":"http://example.com","Clicks":3,"CreationTime":1425315326750138320}
+{"key":"1","original":"http://example.com","clicks":3,"creationTime":1586654007}
 ```
 
 # Development
