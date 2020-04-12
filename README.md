@@ -61,7 +61,7 @@ URL), ensure the `show_info` config value is enabled and then simply send a `TRA
 request, instead of a `GET`.
 
 ```
-$ curl -XTRACE http://localhost:9111/1_
+$ curl -XTRACE http://localhost:9111/1
 ```
 
 ```
